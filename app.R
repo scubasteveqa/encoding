@@ -1,29 +1,25 @@
 library(shiny)
 library(bslib)
+library(jsonlite)  # Add jsonlite to read the manifest directly
 
 ui <- page_sidebar(
   title = "Locale & Encoding Test",
   sidebar = sidebar(
     h4("About"),
-    p("This app tests locale and encoding settings from various sources."),
-    p("Primary test: it_IT / ISO-8859-1"),
+    p("This app tests if the locale and encoding settings in manifest.json are correctly applied."),
+    p("Expected locale: it_IT"),
+    p("Expected encoding: ISO-8859-1"),
     hr(),
-    selectInput("setLocale", "Try setting locale to:", 
-                choices = c("Don't change", "it_IT", "fr_FR", "de_DE", "es_ES"),
-                selected = "Don't change"),
-    selectInput("setEncoding", "Try setting encoding to:", 
-                choices = c("Don't change", "ISO-8859-1", "UTF-8", "latin1"),
-                selected = "Don't change"),
-    actionButton("applySettings", "Apply Settings"),
+    actionButton("trySetLocale", "Try Setting Locale Directly"),
     hr(),
     downloadButton("downloadReport", "Download Results")
   ),
   
   card(
-    card_header("Configuration Information"),
+    card_header("Manifest.json Analysis"),
     card_body(
-      h4("Configuration Sources:"),
-      verbatimTextOutput("configSources")
+      h4("Manifest File Contents:"),
+      verbatimTextOutput("manifestInfo")
     )
   ),
   
@@ -39,121 +35,94 @@ ui <- page_sidebar(
   ),
   
   card(
-    card_header("Troubleshooting"),
+    card_header("Environment Variables"),
     card_body(
-      h4("Available Locales:"),
-      p("First 20 locales available on this system:"),
-      verbatimTextOutput("availableLocales")
+      verbatimTextOutput("envVars")
     )
   )
 )
 
 server <- function(input, output, session) {
   
-  # Try to read manifest.json if it exists
-  manifest_locale <- NULL
-  manifest_encoding <- NULL
-  
-  tryCatch({
-    if(file.exists("manifest.json")) {
-      manifest_content <- jsonlite::fromJSON("manifest.json")
-      manifest_locale <- manifest_content$locale
-      manifest_encoding <- manifest_content$encoding
-    }
-  }, error = function(e) {
-    # Silently continue if manifest can't be read
-  })
-  
-  # Configuration sources with priorities
-  output$configSources <- renderPrint({
-    cat("Environment Variables:\n")
-    cat("  R_LOCALE=", Sys.getenv("R_LOCALE", "(not set)"), "\n")
-    cat("  LOCALE=", Sys.getenv("LOCALE", "(not set)"), "\n")
-    cat("  R_ENCODING=", Sys.getenv("R_ENCODING", "(not set)"), "\n")
-    cat("  ENCODING=", Sys.getenv("ENCODING", "(not set)"), "\n\n")
-    
-    cat("Manifest File:\n")
-    if(is.null(manifest_locale) && is.null(manifest_encoding)) {
-      cat("  (No manifest.json found or couldn't be read)\n\n")
-    } else {
-      cat("  locale=", ifelse(is.null(manifest_locale), "(not set)", manifest_locale), "\n")
-      cat("  encoding=", ifelse(is.null(manifest_encoding), "(not set)", manifest_encoding), "\n\n")
-    }
-    
-    cat("R Session Info:\n")
-    cat("  R version: ", R.version.string, "\n")
-    cat("  Platform: ", R.version$platform, "\n\n")
-  })
-  
-  # Reactive value to track locale changes
-  locale_status <- reactiveValues(
-    current_locale = Sys.getlocale(),
-    attempted_change = FALSE,
-    change_result = ""
-  )
-  
-  # Function to get expected values with priority order:
-  # 1. Environment variables
-  # 2. Manifest file
-  # 3. Default values
-  get_expected_values <- reactive({
-    expected_locale <- Sys.getenv("R_LOCALE", 
-                     Sys.getenv("LOCALE", 
-                              ifelse(is.null(manifest_locale), "it_IT", manifest_locale)))
-    
-    expected_encoding <- Sys.getenv("R_ENCODING", 
-                       Sys.getenv("ENCODING", 
-                                ifelse(is.null(manifest_encoding), "ISO-8859-1", manifest_encoding)))
-    
-    list(locale = expected_locale, encoding = expected_encoding)
-  })
-  
-  # Apply locale settings when button is clicked
-  observeEvent(input$applySettings, {
-    if(input$setLocale != "Don't change" || input$setEncoding != "Don't change") {
-      locale_status$attempted_change <- TRUE
-      
-      # Build locale string
-      new_locale <- NA
-      
-      if(input$setLocale != "Don't change" && input$setEncoding != "Don't change") {
-        # Both specified
-        locale_string <- paste0(input$setLocale, ".", input$setEncoding)
-      } else if(input$setLocale != "Don't change") {
-        # Only locale specified
-        locale_string <- input$setLocale
+  # Read manifest.json if it exists
+  manifest_data <- reactive({
+    tryCatch({
+      if(file.exists("manifest.json")) {
+        fromJSON("manifest.json")
       } else {
-        # Only encoding specified
-        locale_string <- paste0("en_US.", input$setEncoding)
+        NULL
       }
+    }, error = function(e) {
+      NULL
+    })
+  })
+  
+  # Get manifest values
+  manifest_locale <- reactive({
+    manifest <- manifest_data()
+    if(!is.null(manifest) && !is.null(manifest$locale)) manifest$locale else "it_IT"
+  })
+  
+  manifest_encoding <- reactive({
+    manifest <- manifest_data()
+    if(!is.null(manifest) && !is.null(manifest$encoding)) manifest$encoding else "ISO-8859-1"
+  })
+  
+  # Display manifest information
+  output$manifestInfo <- renderPrint({
+    manifest <- manifest_data()
+    if(is.null(manifest)) {
+      cat("Manifest.json not found or couldn't be read.\n")
+      cat("Using default expected values instead.\n")
+    } else {
+      cat("Manifest.json contents:\n")
+      cat("Version:", manifest$version, "\n")
+      cat("Locale setting:", manifest$locale, "\n")
+      cat("Encoding setting:", manifest$encoding, "\n")
       
-      # Try to set the locale
-      tryCatch({
-        new_locale <- Sys.setlocale(locale = locale_string)
-        locale_status$change_result <- paste("Successfully changed locale to:", new_locale)
-      }, error = function(e) {
-        locale_status$change_result <- paste("Failed to set locale:", e$message)
-      }, warning = function(w) {
-        locale_status$change_result <- paste("Warning when setting locale:", w$message)
-      })
-      
-      # Update current locale
-      locale_status$current_locale <- Sys.getlocale()
+      cat("\nRuntime information:\n")
+      if(!is.null(manifest$runtime)) {
+        for(name in names(manifest$runtime)) {
+          cat("  ", name, ": ", manifest$runtime[[name]], "\n", sep="")
+        }
+      } else {
+        cat("  No runtime information found\n")
+      }
+    }
+  })
+  
+  # Get current locale
+  current_locale <- reactive({
+    # This will be re-evaluated if locale is changed through button click
+    Sys.getlocale()
+  })
+  
+  # Try to set locale directly when button is clicked
+  observeEvent(input$trySetLocale, {
+    locale_string <- paste0(manifest_locale(), ".", manifest_encoding())
+    
+    result <- tryCatch({
+      new_locale <- Sys.setlocale(locale = locale_string)
+      list(success = TRUE, message = paste("Successfully set locale to:", new_locale))
+    }, error = function(e) {
+      list(success = FALSE, message = paste("Error setting locale:", e$message))
+    }, warning = function(w) {
+      list(success = FALSE, message = paste("Warning setting locale:", w$message))
+    })
+    
+    # Show result notification
+    if(result$success) {
+      showNotification(result$message, type = "message")
+    } else {
+      showNotification(result$message, type = "error")
     }
   })
   
   # Display locale information
   output$localeInfo <- renderPrint({
-    # Get latest locale info
-    current_locale <- Sys.getlocale()
-    locale_status$current_locale <- current_locale
+    locale <- current_locale()
     
-    cat("Full locale string:\n", current_locale, "\n\n")
-    
-    if(locale_status$attempted_change) {
-      cat("Locale change attempt result:\n", locale_status$change_result, "\n\n")
-    }
-    
+    cat("Full locale string:\n", locale, "\n\n")
     cat("Individual categories:\n")
     
     # Get all locale categories
@@ -174,54 +143,59 @@ server <- function(input, output, session) {
   
   # Display test results
   output$testResults <- renderPrint({
-    # Get current locale and expected values
-    current_locale <- locale_status$current_locale
-    expected <- get_expected_values()
+    locale <- current_locale()
+    expected_locale <- manifest_locale()
+    expected_encoding <- manifest_encoding()
     
     # Test if locale matches expected value
-    locale_test <- grepl(expected$locale, current_locale, fixed = TRUE)
+    locale_test <- grepl(expected_locale, locale, fixed = TRUE)
     
     # Test if encoding is as expected
-    encoding_test <- grepl(expected$encoding, current_locale, fixed = TRUE)
+    encoding_test <- grepl(expected_encoding, locale, fixed = TRUE)
     
-    cat("Expected locale: ", expected$locale, "\n")
-    cat("Expected encoding: ", expected$encoding, "\n\n")
+    cat("Expected locale from manifest: ", expected_locale, "\n")
+    cat("Expected encoding from manifest: ", expected_encoding, "\n\n")
     
-    cat("Locale test (", expected$locale, "): ", 
+    cat("Locale test (", expected_locale, "): ", 
         if(locale_test) "PASSED" else "FAILED", "\n", sep = "")
-    cat("Encoding test (", expected$encoding, "): ", 
+    cat("Encoding test (", expected_encoding, "): ", 
         if(encoding_test) "PASSED" else "FAILED", "\n", sep = "")
     
     if (!locale_test || !encoding_test) {
       cat("\nNOTE: If tests failed, it could be because:\n")
       cat("1. The specified locale isn't available on this system\n")
-      cat("2. The locale/encoding settings weren't applied correctly\n")
+      cat("2. The manifest.json settings weren't applied correctly\n")
       cat("3. The locale was overridden by environment variables\n")
-      cat("\nTry using the controls in the sidebar to manually set locale/encoding\n")
+      
+      cat("\nDebug information:\n")
+      cat("  Current locale: ", locale, "\n")
+      cat("  Expected locale pattern: ", expected_locale, "\n")
+      cat("  Expected encoding pattern: ", expected_encoding, "\n")
+      cat("  Try clicking the 'Try Setting Locale Directly' button to attempt manual setting\n")
     }
   })
   
-  # List available locales
-  output$availableLocales <- renderPrint({
-    all_locales <- tryCatch({
-      system("locale -a", intern = TRUE)
-    }, error = function(e) {
-      "Could not determine available locales"
-    })
+  # Display environment variables
+  output$envVars <- renderPrint({
+    cat("R Environment Variables related to locale:\n\n")
     
-    if(is.character(all_locales) && length(all_locales) > 1) {
-      # Only show first 20 to avoid overloading the display
-      if(length(all_locales) > 20) {
-        cat(paste(all_locales[1:20], collapse = "\n"))
-        cat("\n... and ", length(all_locales) - 20, " more")
+    # List common locale-related environment variables
+    loc_vars <- c("LC_ALL", "LC_COLLATE", "LC_CTYPE", "LC_MONETARY", 
+                  "LC_NUMERIC", "LC_TIME", "LC_MESSAGES", "LANG", 
+                  "LANGUAGE", "R_LOCALE", "R_ENCODING")
+    
+    for(var in loc_vars) {
+      val <- Sys.getenv(var, NA)
+      if(!is.na(val) && val != "") {
+        cat(var, ": ", val, "\n", sep="")
       } else {
-        cat(paste(all_locales, collapse = "\n"))
+        cat(var, ": (not set)\n", sep="")
       }
-    } else {
-      cat("Could not retrieve list of available locales on this system.\n")
-      cat("On Windows, this information may not be easily accessible.\n")
-      cat("On Linux, the 'locale -a' command typically shows available locales.")
     }
+    
+    # Also show R options that might affect locale
+    cat("\nR Options related to locale:\n")
+    cat("R_DEFAULT_LOCALE: ", getOption("R_DEFAULT_LOCALE", "(not set)"), "\n")
   })
   
   # Download report
@@ -230,42 +204,56 @@ server <- function(input, output, session) {
       "locale_test_results.txt"
     },
     content = function(file) {
-      # Get latest info
-      current_locale <- Sys.getlocale()
-      expected <- get_expected_values()
+      locale <- current_locale()
+      expected_locale <- manifest_locale()
+      expected_encoding <- manifest_encoding()
       
       # Test if locale matches expected value
-      locale_test <- grepl(expected$locale, current_locale, fixed = TRUE)
+      locale_test <- grepl(expected_locale, locale, fixed = TRUE)
       
       # Test if encoding is as expected
-      encoding_test <- grepl(expected$encoding, current_locale, fixed = TRUE)
+      encoding_test <- grepl(expected_encoding, locale, fixed = TRUE)
       
+      # Get manifest for report
+      manifest <- manifest_data()
+      manifest_section <- if(is.null(manifest)) {
+        c("Manifest.json not found or couldn't be read.",
+          "Using default expected values instead.")
+      } else {
+        c(
+          "Manifest.json contents:",
+          paste("Version:", manifest$version),
+          paste("Locale setting:", manifest$locale),
+          paste("Encoding setting:", manifest$encoding)
+        )
+      }
+      
+      # Generate report
       writeLines(
         c(
           "Locale Test Results",
           "===================",
           "",
-          paste("Full locale string:", current_locale),
+          manifest_section,
           "",
-          paste("Environment Variables:"),
-          paste("  R_LOCALE=", Sys.getenv("R_LOCALE", "(not set)")),
-          paste("  LOCALE=", Sys.getenv("LOCALE", "(not set)")),
-          paste("  R_ENCODING=", Sys.getenv("R_ENCODING", "(not set)")),
-          paste("  ENCODING=", Sys.getenv("ENCODING", "(not set)")),
+          paste("Full locale string:", locale),
           "",
-          paste("Manifest Settings:"),
-          paste("  locale=", ifelse(is.null(manifest_locale), "(not set)", manifest_locale)),
-          paste("  encoding=", ifelse(is.null(manifest_encoding), "(not set)", manifest_encoding)),
+          paste("Expected locale: ", expected_locale),
+          paste("Expected encoding: ", expected_encoding),
           "",
-          paste("Expected locale: ", expected$locale),
-          paste("Expected encoding: ", expected$encoding),
+          paste("Locale test (", expected_locale, "): ", if(locale_test) "PASSED" else "FAILED"),
+          paste("Encoding test (", expected_encoding, "): ", if(encoding_test) "PASSED" else "FAILED"),
           "",
-          paste("Locale test (", expected$locale, "): ", if(locale_test) "PASSED" else "FAILED", sep=""),
-          paste("Encoding test (", expected$encoding, "): ", if(encoding_test) "PASSED" else "FAILED", sep=""),
+          "Environment Variables:",
+          paste("LC_ALL: ", Sys.getenv("LC_ALL", "(not set)")),
+          paste("LANG: ", Sys.getenv("LANG", "(not set)")),
+          paste("LANGUAGE: ", Sys.getenv("LANGUAGE", "(not set)")),
+          paste("R_LOCALE: ", Sys.getenv("R_LOCALE", "(not set)")),
+          paste("R_ENCODING: ", Sys.getenv("R_ENCODING", "(not set)")),
           "",
           "System Information:",
-          paste("  R version:", R.version.string),
-          paste("  Platform:", R.version$platform)
+          paste("R Version:", R.version.string),
+          paste("Platform:", R.version$platform)
         ),
         file
       )
